@@ -38,7 +38,81 @@ async def save_price(data: dict):
         )
         return r.status_code == 201
 
-async def search_prices(article: str) -> list:
+async def save_wishlist(art: str, note: str = "") -> bool:
+    """Сохраняет артикул в список нет в наличии"""
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"{SUPA_URL}/rest/v1/wishlist",
+            headers={
+                "apikey": SUPA_KEY,
+                "Authorization": f"Bearer {SUPA_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation"
+            },
+            json={"data": {
+                "art": normalize(art),
+                "art_raw": art,
+                "note": note,
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "localId": f"wl_{int(datetime.now().timestamp())}"
+            }}
+        )
+        return r.status_code == 201
+
+async def get_wishlist() -> list:
+    """Получает все артикулы из вишлиста"""
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{SUPA_URL}/rest/v1/wishlist?select=*&limit=1000",
+            headers={
+                "apikey": SUPA_KEY,
+                "Authorization": f"Bearer {SUPA_KEY}",
+            }
+        )
+        if r.status_code != 200:
+            return []
+        return [row.get("data", {}) for row in r.json()]
+
+def get_wishlist_stats(items: list, period: str = "month") -> str:
+    """Статистика по артикулам нет в наличии"""
+    from collections import Counter
+    from datetime import timedelta
+
+    now = datetime.now()
+
+    if period == "month":
+        label = now.strftime("%B %Y")
+        cutoff = now.strftime("%Y-%m")
+        filtered = [p for p in items if p.get("date", "").startswith(cutoff)]
+    elif period == "week":
+        label = "последние 7 дней"
+        cutoff = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+        filtered = [p for p in items if p.get("date", "") >= cutoff]
+    elif period == "all":
+        label = "всё время"
+        filtered = items
+    else:
+        label = period
+        filtered = [p for p in items if p.get("date", "").startswith(period)]
+
+    if not filtered:
+        return f"📋 За {label} запросов не найдено."
+
+    counter = Counter(p.get("art", "—") for p in filtered)
+
+    lines = [f"📋 <b>Нет в наличии — {label}</b>\n"]
+    lines.append(f"Всего запросов: <b>{len(filtered)}</b>")
+    lines.append(f"Уникальных артикулов: <b>{len(counter)}</b>\n")
+    lines.append("🔩 <b>Топ артикулов:</b>")
+
+    for i, (art, cnt) in enumerate(counter.most_common(15), 1):
+        # Найдём последнюю заметку
+        notes = [p.get("note", "") for p in filtered if p.get("art") == art and p.get("note")]
+        note_str = f" — {notes[-1]}" if notes else ""
+        times = "раз" if cnt == 1 else "раза" if cnt < 5 else "раз"
+        lines.append(f"{i}. <code>{art}</code> — {cnt} {times}{note_str}")
+
+    return "\n".join(lines)
     """Ищет цены по артикулу в Supabase"""
     async with httpx.AsyncClient() as client:
         r = await client.get(
@@ -299,44 +373,84 @@ async def handle_update(update: dict):
     if text == "/start":
         await send_message(chat_id, """👋 <b>Ponsse CRM Бот</b>
 
-Я помогаю добавлять цены в журнал CRM.
-
-<b>Как использовать:</b>
-Просто напиши или перешли мне сообщение с артикулом и ценой:
-
-<code>0079980 2350 руб Северный лес</code>
-<code>P45399 1800р ИП Иванов</code>
-
-<b>Команды:</b>
-/find 0079980 — найти цены по артикулу
-/stats — статистика за текущий месяц
-/stats week — за последние 7 дней
-/stats all — за всё время
-/stats 2026-04 — за конкретный месяц
-/help — помощь""")
-        return
-
-    # /help
-    if text == "/help":
-        await send_message(chat_id, """📖 <b>Помощь</b>
+Я помогаю вести учёт цен и спроса на запчасти.
 
 <b>Добавить цену:</b>
-Напиши или перешли сообщение — я сохраню в CRM:
 <code>0079980 2350 руб Северный лес</code>
+
+<b>Нет в наличии — записать запрос:</b>
+<code>/want 0079980</code>
+<code>/want 0079980 срочно нужен клиенту</code>
 
 <b>Найти цены:</b>
 <code>/find 0079980</code>
 
-<b>Статистика:</b>
-<code>/stats</code> — за текущий месяц
-<code>/stats week</code> — за 7 дней
-<code>/stats all</code> — за всё время
-<code>/stats 2026-04</code> — за апрель 2026
+<b>Статистика цен:</b>
+<code>/stats</code> — текущий месяц
+<code>/stats week</code> — 7 дней
+<code>/stats all</code> — всё время
 
-<b>Формат сообщения:</b>
-— Артикул (обязательно)
-— Цена в рублях (обязательно)
-— Кому называлась цена (необязательно)""")
+<b>Статистика спроса (нет в наличии):</b>
+<code>/missing</code> — текущий месяц
+<code>/missing week</code> — 7 дней
+<code>/missing all</code> — всё время
+
+/help — подробная помощь""")
+        return
+
+    if text == "/help":
+        await send_message(chat_id, """📖 <b>Помощь</b>
+
+<b>Добавить цену:</b>
+<code>0079980 2350 руб Северный лес</code>
+<code>279 784,64 с ндс артикул 0080050</code>
+
+<b>Записать артикул которого нет в наличии:</b>
+<code>/want 0079980</code>
+<code>/want 0079980 клиент спрашивал срочно</code>
+
+<b>Найти цены по артикулу:</b>
+<code>/find 0079980</code>
+
+<b>Статистика цен:</b>
+<code>/stats</code> — текущий месяц
+<code>/stats week</code> — 7 дней
+<code>/stats all</code> — всё время
+<code>/stats 2026-04</code> — апрель 2026
+
+<b>Статистика спроса:</b>
+<code>/missing</code> — текущий месяц
+<code>/missing week</code> — 7 дней
+<code>/missing all</code> — всё время""")
+        return
+
+    # /want АРТИКУЛ [заметка] — добавить в список нет в наличии
+    if text.startswith("/want") or text.startswith("/нет"):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            await send_message(chat_id, "Укажи артикул: <code>/want 0079980</code>\nИли с заметкой: <code>/want 0079980 срочно нужен</code>")
+            return
+        rest = parts[1].strip()
+        # Первое слово — артикул, остальное — заметка
+        tokens = rest.split(maxsplit=1)
+        art = tokens[0]
+        note = tokens[1] if len(tokens) > 1 else ""
+        ok = await save_wishlist(art, note)
+        if ok:
+            note_str = f"\n📝 Заметка: {note}" if note else ""
+            await send_message(chat_id, f"📋 <b>Добавлено в список нет в наличии</b>\n\n🔩 Артикул: <code>{normalize(art)}</code>{note_str}\n📅 Дата: {datetime.now().strftime('%Y-%m-%d')}")
+        else:
+            await send_message(chat_id, "⚠️ Ошибка сохранения.")
+        return
+
+    # /missing [month|week|all|YYYY-MM] — статистика нет в наличии
+    if text.startswith("/missing") or text.startswith("/спрос"):
+        parts = text.split(maxsplit=1)
+        period = parts[1].strip() if len(parts) > 1 else "month"
+        await send_message(chat_id, "⏳ Считаю...")
+        items = await get_wishlist()
+        stats = get_wishlist_stats(items, period)
+        await send_message(chat_id, stats)
         return
 
     # /stats [month|week|all|YYYY-MM]
@@ -369,12 +483,27 @@ async def handle_update(update: dict):
         parsed = parse_message(text)
 
     if not parsed:
-        await send_message(chat_id, """❓ Не смог распознать артикул и цену.
+        # Проверяем — может это просто артикул без цены?
+        art_only = re.fullmatch(r'[A-ZА-ЯЁa-zа-яё0-9]{5,12}', text.strip())
+        if art_only:
+            art = text.strip()
+            ok = await save_wishlist(art)
+            if ok:
+                await send_message(chat_id, f"📋 <b>Записано — нет в наличии</b>\n\n🔩 Артикул: <code>{normalize(art)}</code>\n📅 {datetime.now().strftime('%Y-%m-%d')}\n\nЧтобы добавить заметку: <code>/want {art} текст заметки</code>")
+            else:
+                await send_message(chat_id, "⚠️ Ошибка сохранения.")
+            return
 
-Попробуй написать так:
+        await send_message(chat_id, """❓ Не смог распознать.
+
+Чтобы <b>добавить цену</b>:
 <code>0079980 2350 руб Северный лес</code>
 
-или используй /help""")
+Чтобы записать <b>нет в наличии</b> — просто артикул:
+<code>0079980</code>
+<code>P45399</code>
+
+или /help""")
         return
 
     # Сохраняем в Supabase
