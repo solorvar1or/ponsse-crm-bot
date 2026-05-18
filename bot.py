@@ -59,6 +59,91 @@ async def search_prices(article: str) -> list:
                 results.append(d)
         return results
 
+async def get_all_prices() -> list:
+    """Получает все цены из Supabase"""
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{SUPA_URL}/rest/v1/prices?select=*&limit=1000",
+            headers={
+                "apikey": SUPA_KEY,
+                "Authorization": f"Bearer {SUPA_KEY}",
+            }
+        )
+        if r.status_code != 200:
+            return []
+        return [row.get("data", {}) for row in r.json()]
+
+def get_stats_text(prices: list, period: str = "month") -> str:
+    """Формирует текст статистики"""
+    from collections import Counter, defaultdict
+
+    now = datetime.now()
+
+    # Фильтр по периоду
+    if period == "month":
+        label = f"{now.strftime('%B %Y')}"
+        cutoff = now.strftime("%Y-%m")
+        filtered = [p for p in prices if p.get("date", "").startswith(cutoff)]
+    elif period == "week":
+        from datetime import timedelta
+        label = "последние 7 дней"
+        cutoff = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+        filtered = [p for p in prices if p.get("date", "") >= cutoff]
+    elif period == "all":
+        label = "всё время"
+        filtered = prices
+    else:
+        label = period
+        filtered = [p for p in prices if p.get("date", "").startswith(period)]
+
+    if not filtered:
+        return f"📊 За {label} записей не найдено."
+
+    # Топ артикулов
+    art_counter = Counter()
+    art_prices = defaultdict(list)
+    client_counter = Counter()
+
+    for p in filtered:
+        art = p.get("art", "—")
+        price = p.get("price")
+        who = p.get("who", "").strip()
+        art_counter[art] += 1
+        if price:
+            art_prices[art].append(float(price))
+        if who:
+            client_counter[who] += 1
+
+    lines = [f"📊 <b>Статистика за {label}</b>\n"]
+    lines.append(f"Всего записей: <b>{len(filtered)}</b>")
+    lines.append(f"Уникальных артикулов: <b>{len(art_counter)}</b>")
+    if client_counter:
+        lines.append(f"Уникальных клиентов: <b>{len(client_counter)}</b>")
+
+    # Топ 7 артикулов
+    lines.append("\n🔩 <b>Топ артикулов:</b>")
+    for i, (art, cnt) in enumerate(art_counter.most_common(7), 1):
+        prices_list = art_prices.get(art, [])
+        if prices_list:
+            mn = int(min(prices_list))
+            mx = int(max(prices_list))
+            avg = int(sum(prices_list) / len(prices_list))
+            if mn == mx:
+                price_str = f"{mn:,} ₽".replace(",", " ")
+            else:
+                price_str = f"{mn:,}–{mx:,} ₽ (ср. {avg:,})".replace(",", " ")
+        else:
+            price_str = "цена не указана"
+        lines.append(f"{i}. <code>{art}</code> — {cnt} раз · {price_str}")
+
+    # Топ клиентов
+    if client_counter:
+        lines.append("\n👤 <b>Топ клиентов:</b>")
+        for i, (who, cnt) in enumerate(client_counter.most_common(5), 1):
+            lines.append(f"{i}. {who} — {cnt} запросов")
+
+    return "\n".join(lines)
+
 def normalize(s: str) -> str:
     cyr = {"Р":"P","С":"C","В":"B","А":"A","Е":"E","О":"O","Х":"X","К":"K"}
     s = s.strip().upper()
@@ -199,14 +284,17 @@ async def handle_update(update: dict):
 Я помогаю добавлять цены в журнал CRM.
 
 <b>Как использовать:</b>
-Просто напиши мне артикул и цену в любом формате:
+Просто напиши или перешли мне сообщение с артикулом и ценой:
 
 <code>0079980 2350 руб Северный лес</code>
 <code>P45399 1800р ИП Иванов</code>
-<code>0057316 - 3200 - ООО Лесопром</code>
 
 <b>Команды:</b>
 /find 0079980 — найти цены по артикулу
+/stats — статистика за текущий месяц
+/stats week — за последние 7 дней
+/stats all — за всё время
+/stats 2026-04 — за конкретный месяц
 /help — помощь""")
         return
 
@@ -215,20 +303,33 @@ async def handle_update(update: dict):
         await send_message(chat_id, """📖 <b>Помощь</b>
 
 <b>Добавить цену:</b>
-Напиши артикул и цену — я сохраню в CRM:
+Напиши или перешли сообщение — я сохраню в CRM:
 <code>0079980 2350 руб Северный лес</code>
 
 <b>Найти цены:</b>
 <code>/find 0079980</code>
 
+<b>Статистика:</b>
+<code>/stats</code> — за текущий месяц
+<code>/stats week</code> — за 7 дней
+<code>/stats all</code> — за всё время
+<code>/stats 2026-04</code> — за апрель 2026
+
 <b>Формат сообщения:</b>
 — Артикул (обязательно)
-— Цена в рублях (обязательно)  
+— Цена в рублях (обязательно)
 — Кому называлась цена (необязательно)""")
         return
 
-    # /find АРТИКУЛ
-    if text.startswith("/find"):
+    # /stats [month|week|all|YYYY-MM]
+    if text.startswith("/stats"):
+        parts = text.split(maxsplit=1)
+        period = parts[1].strip() if len(parts) > 1 else "month"
+        await send_message(chat_id, "⏳ Считаю статистику...")
+        all_prices = await get_all_prices()
+        stats = get_stats_text(all_prices, period)
+        await send_message(chat_id, stats)
+        return
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
             await send_message(chat_id, "Укажи артикул: <code>/find 0079980</code>")
