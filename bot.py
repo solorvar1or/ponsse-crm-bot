@@ -113,6 +113,8 @@ def get_wishlist_stats(items: list, period: str = "month") -> str:
         lines.append(f"{i}. <code>{art}</code> — {cnt} {times}{note_str}")
 
     return "\n".join(lines)
+
+async def search_prices(article: str) -> list:
     """Ищет цены по артикулу в Supabase"""
     async with httpx.AsyncClient() as client:
         r = await client.get(
