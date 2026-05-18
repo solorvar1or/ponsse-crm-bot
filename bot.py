@@ -156,53 +156,71 @@ def parse_message(text: str) -> dict | None:
     Поддерживает форматы:
       0079980 2350
       0079980 2350 руб Северный лес
+      0080050 - 279 784,64 с ндс
       артикул 0079980 цена 2350
       P45399 - 1800р - ИП Иванов
     """
     text = text.strip()
 
-    # Ищем артикул — буквенно-цифровая последовательность 5-10 символов
+    # Слова которые не являются клиентом
+    IGNORE_WORDS = {
+        'с', 'ндс', 'без', 'руб', 'рублей', 'цена', 'артикул',
+        'шт', 'штук', 'за', 'по', 'от', 'до', 'и', 'в', 'на',
+        'включая', 'включено', 'налог', 'всего', 'итого'
+    }
+
+    # Ищем артикул — буквенно-цифровая последовательность 5-12 символов
     art_match = re.search(r'\b([A-ZА-ЯЁa-zа-яё0-9]{5,12})\b', text)
     if not art_match:
         return None
     art = art_match.group(1).strip()
 
-    # Ищем цену — число (возможно с пробелами/точками/запятыми) перед руб/р/₽
-    price_match = re.search(
-        r'(\d[\d\s]*(?:[.,]\d{1,2})?)\s*(?:руб|р\b|₽)',
-        text, re.IGNORECASE
-    )
-    if not price_match:
-        # Просто число после артикула
-        price_match = re.search(r'\b(\d{3,7})\b', text[art_match.end():])
-    
-    if not price_match:
+    # Ищем цену с учётом пробелов как разделителей тысяч
+    # Форматы: 279 784,64 / 279784.64 / 2350 / 2 350 руб
+    price_patterns = [
+        # Число с пробелами как разделитель тысяч + запятая/точка для копеек
+        r'(\d{1,3}(?:\s\d{3})+(?:[.,]\d{1,2})?)\s*(?:руб|р\b|₽)?',
+        # Обычное число с копейками
+        r'(\d+[.,]\d{1,2})\s*(?:руб|р\b|₽)?',
+        # Просто число
+        r'\b(\d{3,7})\b',
+    ]
+
+    price = None
+    price_match_end = 0
+    for pattern in price_patterns:
+        m = re.search(pattern, text[art_match.end():], re.IGNORECASE)
+        if m:
+            raw = m.group(1).replace(" ", "").replace(",", ".")
+            try:
+                val = float(raw)
+                if 1 < val < 50_000_000:
+                    price = val
+                    price_match_end = art_match.end() + m.end()
+                    break
+            except ValueError:
+                continue
+
+    if not price:
         return None
 
-    price_str = price_match.group(1).replace(" ", "").replace(",", ".")
-    try:
-        price = float(price_str)
-        if not (1 < price < 50_000_000):
-            return None
-    except ValueError:
-        return None
-
-    # Ищем кому — всё что не артикул и не цена
+    # Ищем клиента — текст после цены, исключая стоп-слова
     who = ""
-    # Убираем артикул и цену из текста
-    clean = text
-    clean = re.sub(re.escape(art_match.group(0)), "", clean)
-    clean = re.sub(r'\d[\d\s]*(?:[.,]\d{1,2})?\s*(?:руб|р\b|₽)?', "", clean, flags=re.IGNORECASE)
-    clean = re.sub(r'[:\-–—,.]', " ", clean)
-    clean = re.sub(r'\s+', " ", clean).strip()
-    if len(clean) > 2:
-        who = clean[:60]
+    remainder = text[price_match_end:].strip()
+    # Убираем стоп-слова и знаки
+    remainder = re.sub(r'(?i)\b(' + '|'.join(IGNORE_WORDS) + r')\b', ' ', remainder)
+    remainder = re.sub(r'[:\-–—,.]', ' ', remainder)
+    remainder = re.sub(r'\s+', ' ', remainder).strip()
+
+    # Оставляем только если что-то содержательное осталось
+    if len(remainder) > 2 and not remainder.isdigit():
+        who = remainder[:60]
 
     return {
         "art": normalize(art),
         "desc": "",
         "who": who,
-        "price": price,
+        "price": round(price, 2),
         "src": "client",
         "date": datetime.now().strftime("%Y-%m-%d"),
         "localId": f"tg_{int(datetime.now().timestamp())}"
@@ -362,14 +380,13 @@ async def handle_update(update: dict):
     # Сохраняем в Supabase
     ok = await save_price(parsed)
     if ok:
-        who_str = f"\n👤 Кому: {parsed['who']}" if parsed.get('who') else ""
+        who_str = f"\n👤 Кому: {parsed['who']}" if parsed.get('who','').strip() else ""
+        price_fmt = f"{parsed['price']:,.2f}".replace(",", " ").rstrip("0").rstrip(".")
         await send_message(chat_id, f"""✅ <b>Цена добавлена в CRM!</b>
 
 🔩 Артикул: <code>{parsed['art']}</code>
-💰 Цена: <b>{int(parsed['price']):,} ₽</b>{who_str}
-📅 Дата: {parsed['date']}
-
-Открой вкладку <b>Журнал цен</b> в CRM — запись уже там.""".replace(",", " "))
+💰 Цена: <b>{price_fmt} ₽</b>{who_str}
+📅 Дата: {parsed['date']}""")
     else:
         await send_message(chat_id, "⚠️ Ошибка сохранения. Проверь соединение с базой данных.")
 
